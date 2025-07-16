@@ -1,2 +1,5 @@
 venv/
 __pycache__/
+axis_scraper.log
+progress_results.json
+axis_products_final.json
