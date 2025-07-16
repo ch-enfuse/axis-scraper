@@ -1,7 +1,7 @@
- #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Axis Communications Product Scraper
-Scrapes product datasheets and extracts SoC model and memory information
+Enhanced version with comprehensive logging, timing, and progress tracking
 """
 
 import requests
@@ -14,8 +14,9 @@ from typing import List, Dict, Optional
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 import fitz  # PyMuPDF
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import random
+from datetime import datetime, timedelta
 
 # Configure logging
 logging.basicConfig(
@@ -40,15 +41,44 @@ class ProductInfo:
     collection: str = ""
     series: str = ""
 
+@dataclass
+class ScrapingStats:
+    """Data class for tracking scraping statistics"""
+    start_time: datetime
+    categories_found: int = 0
+    categories_processed: int = 0
+    collections_found: int = 0
+    collections_processed: int = 0
+    series_found: int = 0
+    series_processed: int = 0
+    products_found: int = 0
+    products_processed: int = 0
+    products_with_datasheets: int = 0
+    products_with_soc: int = 0
+    products_with_memory: int = 0
+    categories_scraped: List[str] = field(default_factory=list)
+    collections_scraped: List[str] = field(default_factory=list)
+
 class AxisScraper:
-    def __init__(self, base_url: str = "https://www.axis.com", delay_range: tuple = (1, 3)):
+    def __init__(self, base_url: str = "https://www.axis.com", delay_range: tuple = (1, 3), download_pdfs: bool = True):
+        """
+        Initialize the Axis Communications product scraper.
+        
+        Args:
+            base_url (str): Base URL for Axis Communications website. Defaults to "https://www.axis.com".
+            delay_range (tuple): Range for random delays between requests in seconds. Defaults to (1, 3).
+            download_pdfs (bool): Whether to download and parse PDF datasheets for SoC and memory info. 
+                                Defaults to True. Set to False for faster scraping when detailed specs are not needed.
+        """
         self.base_url = base_url
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         })
         self.delay_range = delay_range
+        self.download_pdfs = download_pdfs
         self.products = []
+        self.stats = None
         
     def _delay(self):
         """Add random delay between requests"""
@@ -81,7 +111,7 @@ class AxisScraper:
     def get_main_categories(self) -> List[Dict[str, str]]:
         """Get main product categories from the products page"""
         url = f"{self.base_url}/en-us/products"
-        logger.info(f"Fetching main categories from: {url}")
+        logger.info(f"🔍 Fetching main categories from: {url}")
         
         response = self._make_request(url)
         if not response:
@@ -112,13 +142,17 @@ class AxisScraper:
                     'name': category_name,
                     'url': category_url
                 })
-                logger.info(f"Found category: {category_name}")
+                logger.debug(f"Found category: {category_name}")
         
+        if self.stats:
+            self.stats.categories_found = len(categories)
+        
+        logger.info(f"📋 Found {len(categories)} total categories: {[cat['name'] for cat in categories]}")
         return categories
     
     def get_collections_in_category(self, category_url: str, category_name: str) -> List[Dict[str, str]]:
         """Get collections within a category"""
-        logger.info(f"Fetching collections from category: {category_name}")
+        logger.info(f"📂 Processing category: '{category_name}'")
         
         response = self._make_request(category_url)
         if not response:
@@ -149,13 +183,18 @@ class AxisScraper:
                     'url': collection_url,
                     'category': category_name
                 })
-                logger.info(f"Found collection: {collection_name}")
+                logger.debug(f"Found collection: {collection_name}")
         
+        if self.stats:
+            self.stats.collections_found += len(collections)
+            self.stats.categories_scraped.append(category_name)
+        
+        logger.info(f"  📁 Found {len(collections)} collections in '{category_name}': {[coll['name'] for coll in collections]}")
         return collections
     
     def get_series_in_collection(self, collection_url: str, collection_name: str, category_name: str) -> List[Dict[str, str]]:
         """Get product series within a collection"""
-        logger.info(f"Fetching series from collection: {collection_name}")
+        logger.info(f"  📦 Processing collection: '{collection_name}' in '{category_name}'")
         
         response = self._make_request(collection_url)
         if not response:
@@ -187,13 +226,20 @@ class AxisScraper:
                     'collection': collection_name,
                     'category': category_name
                 })
-                logger.info(f"Found series: {series_name}")
+                logger.debug(f"Found series: {series_name}")
         
+        if self.stats:
+            self.stats.series_found += len(series_list)
+            collection_full_name = f"{category_name} > {collection_name}"
+            if collection_full_name not in self.stats.collections_scraped:
+                self.stats.collections_scraped.append(collection_full_name)
+        
+        logger.info(f"    📊 Found {len(series_list)} series in collection '{collection_name}': {[series['name'] for series in series_list]}")
         return series_list
     
     def get_products_in_series(self, series_url: str, series_name: str, collection_name: str, category_name: str) -> List[ProductInfo]:
         """Get individual products within a series"""
-        logger.info(f"Fetching products from series: {series_name}")
+        logger.info(f"    🔍 Processing series: '{series_name}' in '{collection_name}'")
         
         response = self._make_request(series_url)
         if not response:
@@ -226,7 +272,7 @@ class AxisScraper:
                         series=series_name
                     )
                     products.append(product_info)
-                    logger.info(f"Found product: {product_name}")
+                    logger.debug(f"Found product: {product_name}")
         else:
             # This might be a single product page
             title_element = soup.find('h1')
@@ -240,14 +286,18 @@ class AxisScraper:
                     series=series_name
                 )
                 products.append(product_info)
-                logger.info(f"Found single product: {product_name}")
+                logger.debug(f"Found single product: {product_name}")
         
+        if self.stats:
+            self.stats.products_found += len(products)
+        
+        logger.info(f"      📱 Found {len(products)} products in series '{series_name}': {[p.product_name for p in products]}")
         return products
     
     def get_datasheet_url(self, product: ProductInfo) -> str:
         """Get datasheet PDF URL from product support page"""
         support_url = f"{product.product_url}/support"
-        logger.info(f"Fetching datasheet for: {product.product_name}")
+        logger.debug(f"Checking for datasheet: {product.product_name}")
         
         response = self._make_request(support_url)
         if not response:
@@ -272,15 +322,15 @@ class AxisScraper:
                     href = download_link.get('href')
                     if href:
                         datasheet_url = urljoin(self.base_url, href)
-                        logger.info(f"Found datasheet: {datasheet_url}")
+                        logger.debug(f"Found datasheet: {datasheet_url}")
                         return datasheet_url
         
-        logger.warning(f"No datasheet found for {product.product_name}")
+        logger.debug(f"No datasheet found for {product.product_name}")
         return ""
     
     def download_and_parse_pdf(self, pdf_url: str, product_name: str) -> Dict[str, str]:
         """Download PDF and extract SoC model and memory information"""
-        logger.info(f"Downloading and parsing PDF for: {product_name}")
+        logger.debug(f"📄 Downloading and parsing PDF for: {product_name}")
         
         try:
             response = self._make_request(pdf_url)
@@ -351,7 +401,7 @@ class AxisScraper:
                     memory = match.group(1).strip()
                     break
             
-            logger.info(f"Extracted - SoC: {soc_model}, Memory: {memory}")
+            logger.debug(f"Extracted - SoC: {soc_model}, Memory: {memory}")
             
         except Exception as e:
             logger.error(f"Failed to extract from PDF {pdf_path}: {e}")
@@ -359,30 +409,40 @@ class AxisScraper:
         return {"soc_model": soc_model, "memory": memory}
     
     def scrape_all_products(self, limit_categories: int = None, limit_collections: int = None) -> List[Dict]:
-        """Main method to scrape all products"""
-        logger.info("Starting full product scrape")
+        """Main method to scrape all products with comprehensive logging"""
+        start_time = datetime.now()
+        self.stats = ScrapingStats(start_time=start_time)
+        
+        logger.info("🚀 Starting comprehensive Axis Communications product scrape")
+        logger.info(f"⏰ Scrape started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
         
         # Get main categories
         categories = self.get_main_categories()
-        if limit_categories:
-            categories = categories[:limit_categories]
+        # if limit_categories:
+        #     categories = categories[:limit_categories]
+        #     logger.info(f"🔒 Limited to first {limit_categories} categories")
         
         all_products = []
         
-        for category in categories:
-            # Focus on Network Cameras first as per example
-            if "Network cameras" not in category['name']:
-                continue
+        for cat_idx, category in enumerate(categories, 1):
+            category_start_time = datetime.now()
+            logger.info(f"\n{'='*80}")
+            logger.info(f"📂 PROCESSING CATEGORY {cat_idx}/{len(categories)}: '{category['name']}'")
+            logger.info(f"{'='*80}")
                 
-            logger.info(f"Processing category: {category['name']}")
-            
             # Get collections in category
             collections = self.get_collections_in_category(category['url'], category['name'])
-            if limit_collections:
-                collections = collections[:limit_collections]
+            # if limit_collections:
+            #     collections = collections[:limit_collections]
+            #     logger.info(f"🔒 Limited to first {limit_collections} collections per category")
             
-            for collection in collections:
-                logger.info(f"Processing collection: {collection['name']}")
+            self.stats.categories_processed += 1
+            
+            for coll_idx, collection in enumerate(collections, 1):
+                collection_start_time = datetime.now()
+                logger.info(f"\n{'-'*60}")
+                logger.info(f"📁 PROCESSING COLLECTION {coll_idx}/{len(collections)}: '{collection['name']}'")
+                logger.info(f"{'-'*60}")
                 
                 # Get series in collection
                 series_list = self.get_series_in_collection(
@@ -391,8 +451,11 @@ class AxisScraper:
                     collection['category']
                 )
                 
-                for series in series_list:
-                    logger.info(f"Processing series: {series['name']}")
+                self.stats.collections_processed += 1
+                
+                for series_idx, series in enumerate(series_list, 1):
+                    series_start_time = datetime.now()
+                    logger.info(f"\n📦 Processing series {series_idx}/{len(series_list)}: '{series['name']}'")
                     
                     # Get products in series
                     products = self.get_products_in_series(
@@ -402,18 +465,39 @@ class AxisScraper:
                         series['category']
                     )
                     
-                    for product in products:
-                        # Get datasheet URL
+                    self.stats.series_processed += 1
+                    
+                    for prod_idx, product in enumerate(products, 1):
+                        product_start_time = datetime.now()
+                        logger.info(f"      🔍 Processing product {prod_idx}/{len(products)}: '{product.product_name}'")
+                        
+                        # Get datasheet URL (always try to find the URL)
                         product.datasheet_url = self.get_datasheet_url(product)
                         
                         if product.datasheet_url:
-                            # Extract info from PDF
-                            pdf_info = self.download_and_parse_pdf(
-                                product.datasheet_url, 
-                                product.product_name
-                            )
-                            product.soc_model = pdf_info["soc_model"]
-                            product.memory = pdf_info["memory"]
+                            self.stats.products_with_datasheets += 1
+                            logger.info(f"        📄 Found datasheet for '{product.product_name}'")
+                            
+                            # Only download and parse PDF if enabled
+                            if self.download_pdfs:
+                                # Extract info from PDF
+                                pdf_info = self.download_and_parse_pdf(
+                                    product.datasheet_url, 
+                                    product.product_name
+                                )
+                                product.soc_model = pdf_info["soc_model"]
+                                product.memory = pdf_info["memory"]
+                                
+                                if product.soc_model:
+                                    self.stats.products_with_soc += 1
+                                    logger.info(f"        🔧 Extracted SoC: {product.soc_model}")
+                                if product.memory:
+                                    self.stats.products_with_memory += 1
+                                    logger.info(f"        💾 Extracted Memory: {product.memory}")
+                            else:
+                                logger.info(f"        ⏭️  PDF download disabled - skipping datasheet parsing")
+                        else:
+                            logger.warning(f"        ❌ No datasheet found for '{product.product_name}'")
                         
                         # Convert to dict for output
                         product_dict = {
@@ -428,50 +512,114 @@ class AxisScraper:
                         }
                         
                         all_products.append(product_dict)
-                        logger.info(f"Completed product: {product.product_name}")
+                        self.stats.products_processed += 1
+                        
+                        product_elapsed = datetime.now() - product_start_time
+                        logger.info(f"        ✅ Completed product '{product.product_name}' in {product_elapsed.total_seconds():.1f}s")
                         
                         # Save progress periodically
                         if len(all_products) % 10 == 0:
                             self.save_results(all_products, "progress_results.json")
+                            logger.info(f"💾 Progress saved: {len(all_products)} products processed")
+                    
+                    series_elapsed = datetime.now() - series_start_time
+                    logger.info(f"✅ Completed series '{series['name']}' ({len(products)} products) in {series_elapsed.total_seconds():.1f}s")
+                
+                collection_elapsed = datetime.now() - collection_start_time
+                logger.info(f"✅ Completed collection '{collection['name']}' ({len(series_list)} series) in {collection_elapsed.total_seconds():.1f}s")
+            
+            category_elapsed = datetime.now() - category_start_time
+            logger.info(f"✅ Completed category '{category['name']}' ({len(collections)} collections) in {category_elapsed.total_seconds():.1f}s")
+        
+        # Log final statistics
+        self._log_final_statistics(start_time)
         
         return all_products
+    
+    def _log_final_statistics(self, start_time: datetime):
+        """Log comprehensive final statistics"""
+        end_time = datetime.now()
+        total_elapsed = end_time - start_time
+        
+        logger.info(f"\n{'='*80}")
+        logger.info(f"🎉 SCRAPING COMPLETED!")
+        logger.info(f"{'='*80}")
+        logger.info(f"⏰ Started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"⏰ Ended: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"⏱️  Total execution time: {total_elapsed}")
+        logger.info(f"📊 FINAL STATISTICS:")
+        logger.info(f"   📋 Categories found: {self.stats.categories_found}")
+        logger.info(f"   📂 Categories processed: {self.stats.categories_processed}")
+        logger.info(f"   📁 Collections found: {self.stats.collections_found}")
+        logger.info(f"   📦 Collections processed: {self.stats.collections_processed}")
+        logger.info(f"   📊 Series found: {self.stats.series_found}")
+        logger.info(f"   🔧 Series processed: {self.stats.series_processed}")
+        logger.info(f"   📱 Products found: {self.stats.products_found}")
+        logger.info(f"   ✅ Products processed: {self.stats.products_processed}")
+        logger.info(f"   📄 Products with datasheets: {self.stats.products_with_datasheets}")
+        logger.info(f"   🔧 Products with SoC info: {self.stats.products_with_soc}")
+        logger.info(f"   💾 Products with memory info: {self.stats.products_with_memory}")
+        logger.info(f"📂 Categories scraped: {self.stats.categories_scraped}")
+        logger.info(f"📁 Collections scraped:")
+        for collection in self.stats.collections_scraped:
+            logger.info(f"   - {collection}")
     
     def save_results(self, products: List[Dict], filename: str = "axis_products.json"):
         """Save results to JSON file"""
         try:
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(products, f, indent=2, ensure_ascii=False)
-            logger.info(f"Saved {len(products)} products to {filename}")
+            logger.debug(f"Saved {len(products)} products to {filename}")
         except Exception as e:
             logger.error(f"Failed to save results: {e}")
 
 def main():
-    """Main execution function"""
-    scraper = AxisScraper()
+    """Main execution function with enhanced logging and timing"""
+    # Initialize scraper with PDF downloading enabled (default)
+    # To disable PDF downloading for faster scraping, use: AxisScraper(download_pdfs=False)
+    scraper = AxisScraper(download_pdfs=False)
     
-    # Start with a limited scrape for testing
-    logger.info("Starting Axis Communications product scraper")
+    logger.info("🚀 Starting enhanced Axis Communications product scraper")
+    logger.info(f"📄 PDF downloading: {'✅ Enabled' if scraper.download_pdfs else '❌ Disabled'}")
     
     try:
         # Scrape products (limit for testing)
-        products = scraper.scrape_all_products(limit_categories=1, limit_collections=2)
+        products = scraper.scrape_all_products(limit_categories=12, limit_collections=2)
         
         # Save final results
         scraper.save_results(products, "axis_products_final.json")
         
-        logger.info(f"Scraping completed. Found {len(products)} products.")
+        logger.info(f"🎉 Scraping completed successfully!")
+        logger.info(f"📊 Final results: {len(products)} products saved to axis_products_final.json")
         
-        # Print summary
-        print(f"\nScraping Summary:")
-        print(f"Total products: {len(products)}")
-        print(f"Products with datasheets: {sum(1 for p in products if p['datasheet_url'])}")
-        print(f"Products with SoC info: {sum(1 for p in products if p['soc_model'])}")
-        print(f"Products with memory info: {sum(1 for p in products if p['memory'])}")
+        # Print summary to console
+        if scraper.stats:
+            print(f"\n{'='*60}")
+            print(f"🎉 SCRAPING SUMMARY")
+            print(f"{'='*60}")
+            print(f"📄 PDF downloading: {'✅ Enabled' if scraper.download_pdfs else '❌ Disabled'}")
+            print(f"⏱️  Total execution time: {datetime.now() - scraper.stats.start_time}")
+            print(f"📋 Categories processed: {scraper.stats.categories_processed}/{scraper.stats.categories_found}")
+            print(f"📁 Collections processed: {scraper.stats.collections_processed}")
+            print(f"📦 Series processed: {scraper.stats.series_processed}")
+            print(f"📱 Products processed: {scraper.stats.products_processed}")
+            print(f"📄 Products with datasheets: {scraper.stats.products_with_datasheets}")
+            print(f"🔧 Products with SoC info: {scraper.stats.products_with_soc}")
+            print(f"💾 Products with memory info: {scraper.stats.products_with_memory}")
+            print(f"📂 Categories: {', '.join(scraper.stats.categories_scraped)}")
+            print(f"📁 Collections: {', '.join(scraper.stats.collections_scraped)}")
+            print(f"{'='*60}")
         
     except KeyboardInterrupt:
-        logger.info("Scraping interrupted by user")
+        logger.info("⏹️  Scraping interrupted by user")
+        if scraper.products:
+            scraper.save_results(scraper.products, "interrupted_results.json")
+            logger.info(f"💾 Partial results saved: {len(scraper.products)} products")
     except Exception as e:
-        logger.error(f"Scraping failed: {e}")
+        logger.error(f"❌ Scraping failed: {e}")
+        if scraper.products:
+            scraper.save_results(scraper.products, "error_results.json")
+            logger.info(f"💾 Partial results saved: {len(scraper.products)} products")
 
 if __name__ == "__main__":
-    main()
+    main() 
