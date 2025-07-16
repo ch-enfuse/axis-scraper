@@ -40,6 +40,7 @@ class ProductInfo:
     category: str = ""
     collection: str = ""
     series: str = ""
+    youtube_video_url: str = ""
 
 @dataclass
 class ScrapingStats:
@@ -56,6 +57,7 @@ class ScrapingStats:
     products_with_datasheets: int = 0
     products_with_soc: int = 0
     products_with_memory: int = 0
+    products_with_youtube_videos: int = 0
     categories_scraped: List[str] = field(default_factory=list)
     collections_scraped: List[str] = field(default_factory=list)
 
@@ -328,6 +330,50 @@ class AxisScraper:
         logger.debug(f"No datasheet found for {product.product_name}")
         return ""
     
+    def get_youtube_video_url(self, product: ProductInfo) -> str:
+        """Get YouTube video URL from product page"""
+        logger.debug(f"🎥 Checking for YouTube video: {product.product_name}")
+        
+        response = self._make_request(product.product_url)
+        if not response:
+            return ""
+        
+        soup = self._parse_html(response)
+        if not soup:
+            return ""
+        
+        try:
+            # Look for the specific video embed div
+            video_div = soup.find('div', class_='video-embed-field-provider-youtube video-embed-field-responsive-video')
+            if not video_div:
+                logger.debug(f"No YouTube video div found for {product.product_name}")
+                return ""
+            
+            # Find the iframe inside the div
+            iframe = video_div.find('iframe')
+            if not iframe:
+                logger.debug(f"No iframe found in video div for {product.product_name}")
+                return ""
+            
+            # Get the src attribute
+            video_url = iframe.get('src')
+            if video_url and 'youtube.com/embed' in video_url:
+                logger.debug(f"Found YouTube video: {video_url}")
+                return video_url
+            
+            # Also check data-src as fallback
+            data_src = iframe.get('data-src')
+            if data_src and 'youtube.com/embed' in data_src:
+                logger.debug(f"Found YouTube video (data-src): {data_src}")
+                return data_src
+                
+            logger.debug(f"No valid YouTube URL found for {product.product_name}")
+            return ""
+            
+        except Exception as e:
+            logger.error(f"Failed to extract YouTube video URL for {product.product_name}: {e}")
+            return ""
+
     def download_and_parse_pdf(self, pdf_url: str, product_name: str) -> Dict[str, str]:
         """Download PDF and extract SoC model and memory information"""
         logger.debug(f"📄 Downloading and parsing PDF for: {product_name}")
@@ -474,6 +520,12 @@ class AxisScraper:
                         # Get datasheet URL (always try to find the URL)
                         product.datasheet_url = self.get_datasheet_url(product)
                         
+                        # Get YouTube video URL
+                        product.youtube_video_url = self.get_youtube_video_url(product)
+                        if product.youtube_video_url:
+                            self.stats.products_with_youtube_videos += 1
+                            logger.info(f"        🎥 Found YouTube video for '{product.product_name}'")
+                        
                         if product.datasheet_url:
                             self.stats.products_with_datasheets += 1
                             logger.info(f"        📄 Found datasheet for '{product.product_name}'")
@@ -508,7 +560,8 @@ class AxisScraper:
                             "memory": product.memory,
                             "category": product.category,
                             "collection": product.collection,
-                            "series": product.series
+                            "series": product.series,
+                            "youtube_video_url": product.youtube_video_url
                         }
                         
                         all_products.append(product_dict)
@@ -606,6 +659,7 @@ def main():
             print(f"📄 Products with datasheets: {scraper.stats.products_with_datasheets}")
             print(f"🔧 Products with SoC info: {scraper.stats.products_with_soc}")
             print(f"💾 Products with memory info: {scraper.stats.products_with_memory}")
+            print(f"🎥 Products with YouTube videos: {scraper.stats.products_with_youtube_videos}")
             print(f"📂 Categories: {', '.join(scraper.stats.categories_scraped)}")
             print(f"📁 Collections: {', '.join(scraper.stats.collections_scraped)}")
             print(f"{'='*60}")
